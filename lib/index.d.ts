@@ -32,7 +32,9 @@ declare module FtpClient {
     const ERROR_MESSAGE_CANCELLED: string;
     function downloadFile(local_path: string, remote_path: string): Promise<void>;
     function cancelDownloadFile(token: string): Promise<void>;
-    function makedir(remote_path: string): Promise<void>;
+    function makeDir(remote_path: string): Promise<void>;
     function moveFileOrDirectory(remote_path: string, new_remote_path: string): Promise<void>;
+    function checkFileExists(remote_path: string, remove_file_name: string): Promise<boolean>;
+    function getFolderSize(remote_path: string): Promise<number>;
 }
 export default FtpClient;

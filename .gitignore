@@ -327,3 +327,7 @@ fabric.properties
 
 # End of https://www.gitignore.io/api/xcode,macos,android,cocoapods,objective-c,androidstudio,visualstudiocode
 node_modules
+config.bat
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
