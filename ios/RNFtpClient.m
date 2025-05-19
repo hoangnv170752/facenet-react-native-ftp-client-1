@@ -526,7 +526,7 @@ RCT_REMAP_METHOD(makeDir,
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
-    LxFTPRequest *request = [LxFTPRequest createDirectoryRequest];
+    LxFTPRequest *request = [LxFTPRequest createResourceRequest];
     NSURL* serverURL = [[NSURL URLWithString:self->url] URLByAppendingPathComponent:path];
     request.serverURL = serverURL;
     if (!request.serverURL) {
