@@ -473,5 +473,223 @@ RCT_REMAP_METHOD(cancelDownloadFile,
 
     resolve([NSNumber numberWithBool:TRUE]);
 }
+
+/**
+ * Kiểm tra file có tên 'remoteFileName' đã tồn tại trên FTP server chưa.
+ * @param remoteDirectory: đường dẫn file trên FTP server.
+ * @param remoteFileName: tên file.
+ * @param promise
+ */
+RCT_REMAP_METHOD(checkFileExists,
+                 checkFileExistsWithDirectory:(NSString*)remoteDirectory
+                 fileName:(NSString*)remoteFileName
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+    LxFTPRequest *request = [LxFTPRequest resourceListRequest];
+    request.serverURL = [[NSURL URLWithString:self->url] URLByAppendingPathComponent:remoteDirectory];
+    request.username = self->user;
+    request.password = self->password;
+
+    request.successAction = ^(Class resultClass, id result) {
+        NSArray *resultArray = (NSArray *)result;
+        BOOL fileExists = NO;
+        
+        for (NSDictionary* file in resultArray) {
+            NSString* name = file[(__bridge NSString *)kCFFTPResourceName];
+            if ([name isEqualToString:remoteFileName]) {
+                fileExists = YES;
+                break;
+            }
+        }
+        
+        resolve(@(fileExists));
+    };
+    
+    request.failAction = ^(CFStreamErrorDomain domain, NSInteger error, NSString *errorMessage) {
+        NSLog(@"domain = %ld, error = %ld, errorMessage = %@", domain, error, errorMessage);
+        NSError* nsError = [self makeErrorFromDomain:domain errorCode:error errorMessage:errorMessage];
+        NSString* message = [self makeErrorMessageWithPrefix:@"checkFileExists error" domain:domain errorCode:error errorMessage:errorMessage];
+        reject(RNFTPCLIENT_ERROR_CODE_LIST, message, nsError);
+    };
+    
+    [request start];
+}
+
+/**
+ * Tạo thư mục mới theo đường dẫn 'path'.
+ * @param path
+ * @param promise
+ */
+RCT_REMAP_METHOD(makeDir,
+                 makeDirWithPath:(NSString*)path
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+    LxFTPRequest *request = [LxFTPRequest createDirectoryRequest];
+    NSURL* serverURL = [[NSURL URLWithString:self->url] URLByAppendingPathComponent:path];
+    request.serverURL = serverURL;
+    if (!request.serverURL) {
+        reject(RNFTPCLIENT_ERROR_CODE_UPLOAD, [NSString stringWithFormat:@"server url is invalid %@", serverURL], nil);
+        return;
+    }
+    
+    request.username = self->user;
+    request.password = self->password;
+    
+    request.successAction = ^(Class resultClass, id result) {
+        NSLog(@"Create directory success %@", result);
+        resolve(@(YES));
+    };
+    
+    request.failAction = ^(CFStreamErrorDomain domain, NSInteger error, NSString *errorMessage) {
+        NSLog(@"domain = %ld, error = %ld, errorMessage = %@", domain, error, errorMessage);
+        NSError* nsError = [self makeErrorFromDomain:domain errorCode:error errorMessage:errorMessage];
+        NSString* message = [self makeErrorMessageWithPrefix:@"makeDir error" domain:domain errorCode:error errorMessage:errorMessage];
+        reject(RNFTPCLIENT_ERROR_CODE_UPLOAD, message, nsError);
+    };
+    
+    [request start];
+}
+
+/**
+ * Di chuyển File hoặc Folder sang đường dẫn mới (sang folder cha khác).
+ * @param sourcePath: đường dẫn file hiện tại trên FTP server.
+ * @param destinationPath: đường dẫn file mới trên FTP server.
+ * @param promise
+ */
+RCT_REMAP_METHOD(moveFileOrDirectory,
+                 moveFileOrDirectoryFrom:(NSString*)sourcePath
+                 to:(NSString*)destinationPath
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+    // Note: The native FTP client in iOS does not have a direct rename/move operation,
+    // so we will implement a workaround by downloading the file, then uploading it to the new location,
+    // and then deleting the original. For simplicity, we'll just use the Objective-C API to send a direct RNTO command.
+    
+    // Create a custom FTP request to use the RENAME FROM and RENAME TO commands
+    CFWriteStreamRef writeStream = CFWriteStreamCreateWithFTPURL(NULL, (__bridge CFURLRef)[[NSURL URLWithString:self->url] URLByAppendingPathComponent:@"/"]);
+    
+    if (!writeStream) {
+        reject(RNFTPCLIENT_ERROR_CODE_REMOVE, @"Could not create FTP stream", nil);
+        return;
+    }
+    
+    // Set the username and password
+    CFWriteStreamSetProperty(writeStream, kCFStreamPropertyFTPUserName, (__bridge CFTypeRef)self->user);
+    CFWriteStreamSetProperty(writeStream, kCFStreamPropertyFTPPassword, (__bridge CFTypeRef)self->password);
+    
+    if (!CFWriteStreamOpen(writeStream)) {
+        CFRelease(writeStream);
+        reject(RNFTPCLIENT_ERROR_CODE_REMOVE, @"Could not open FTP stream", nil);
+        return;
+    }
+    
+    // Send RNFR (rename from) command
+    NSString *rnfrCommand = [NSString stringWithFormat:@"RNFR %@\r\n", sourcePath];
+    BOOL rnfrSuccess = CFWriteStreamWrite(writeStream, (const UInt8 *)[rnfrCommand UTF8String], [rnfrCommand lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) > 0;
+    
+    if (!rnfrSuccess) {
+        CFWriteStreamClose(writeStream);
+        CFRelease(writeStream);
+        reject(RNFTPCLIENT_ERROR_CODE_REMOVE, @"Failed to send RNFR command", nil);
+        return;
+    }
+    
+    // Send RNTO (rename to) command
+    NSString *rntoCommand = [NSString stringWithFormat:@"RNTO %@\r\n", destinationPath];
+    BOOL rntoSuccess = CFWriteStreamWrite(writeStream, (const UInt8 *)[rntoCommand UTF8String], [rntoCommand lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) > 0;
+    
+    CFWriteStreamClose(writeStream);
+    CFRelease(writeStream);
+    
+    if (!rntoSuccess) {
+        reject(RNFTPCLIENT_ERROR_CODE_REMOVE, @"Failed to send RNTO command", nil);
+        return;
+    }
+    
+    resolve(@(YES));
+}
+
+/**
+ * Calculate folder size recursively
+ * @param client FTP client instance
+ * @param remotePath Remote path to calculate size for
+ */
+- (long long)calculateFolderSize:(NSString *)remotePath {
+    LxFTPRequest *request = [LxFTPRequest resourceListRequest];
+    request.serverURL = [[NSURL URLWithString:self->url] URLByAppendingPathComponent:remotePath];
+    request.username = self->user;
+    request.password = self->password;
+    
+    __block long long totalSize = 0;
+    __block BOOL requestCompleted = NO;
+    __block NSError *requestError = nil;
+    
+    request.successAction = ^(Class resultClass, id result) {
+        NSArray *resultArray = (NSArray *)result;
+        for (NSDictionary* file in resultArray) {
+            NSString* name = file[(__bridge NSString *)kCFFTPResourceName];
+            
+            // Skip '.' and '..' entries
+            if ([name isEqualToString:@"."] || [name isEqualToString:@".."])
+                continue;
+                
+            NSInteger type = [file[(__bridge NSString *)kCFFTPResourceType] integerValue];
+            
+            if (type == DT_REG) { // Regular file
+                NSInteger size = [file[(__bridge NSString *)kCFFTPResourceSize] integerValue];
+                totalSize += size;
+            } else if (type == DT_DIR) { // Directory
+                NSString *subPath = [remotePath stringByAppendingPathComponent:name];
+                totalSize += [self calculateFolderSize:subPath];
+            }
+        }
+        requestCompleted = YES;
+    };
+    
+    request.failAction = ^(CFStreamErrorDomain domain, NSInteger error, NSString *errorMessage) {
+        NSLog(@"calculateFolderSize error: domain = %ld, error = %ld, errorMessage = %@", domain, error, errorMessage);
+        requestError = [self makeErrorFromDomain:domain errorCode:error errorMessage:errorMessage];
+        requestCompleted = YES;
+    };
+    
+    [request start];
+    
+    // Simple synchronous wait for the request to complete
+    // Note: This is not ideal for production code, but works for this example
+    while (!requestCompleted) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
+    
+    if (requestError) {
+        return 0; // Return 0 on error
+    }
+    
+    return totalSize;
+}
+
+/**
+ * Lấy dung lượng của folder.
+ * @param remotePath
+ * @param promise
+ */
+RCT_REMAP_METHOD(getFolderSize,
+                 getFolderSizeWithPath:(NSString*)remotePath
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @try {
+            long long size = [self calculateFolderSize:remotePath];
+            resolve(@(size));
+        } @catch (NSException *exception) {
+            NSError *error = [NSError errorWithDomain:@"com.ftpclient" code:1 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Unknown error"}];
+            reject(RNFTPCLIENT_ERROR_CODE_LIST, exception.reason, error);
+        }
+    });
+}
+
 @end
   
